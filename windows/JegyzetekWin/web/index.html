@@ -269,13 +269,12 @@ textarea.field{min-height:200px;resize:vertical;font-family:ui-monospace,Consola
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <script>
 /* ===== Beállítás: a Firebase Realtime Database URL-je ===== */
-const CFG = { databaseURL: "https://millnote-default-rtdb.europe-west1.firebasedatabase.app" };
+const CFG = { databaseURL: "https://millnote-default-rtdb.europe-west1.firebasedatabase.app", apiKey: "AIzaSyDSBEXsee2gv_b8XuAk2RTuph33e6IL0aA" };
 
 const VERSION = "2.0";
 const PURGE = 30 * 864e5;          // lomtár: 30 nap után végleges törlés
 const SNAP_EVERY = 10 * 60e3;      // automatikus előzmény legfeljebb 10 percenként
 const HIST_KEEP = 20;              // jegyzetenként ennyi előzmény marad
-const KEY = "jegyzet.sync";        // a szinkronkód helye (a régi verzióval közös)
 const COLORS = [
   { id: "", name: "Nincs szín", c: "transparent" },
   { id: "blue", name: "Kék", c: "#60A5FA" },
@@ -409,7 +408,7 @@ let saveT = null;
 const stateKey = () => "millnotes.state." + hash;
 function saveLocal() {
   clearTimeout(saveT); saveT = null;
-  if (!hash) return;
+  if (!hash || loggingOut) return;
   const ok = lsSet(stateKey(), JSON.stringify({ v: 2, items, dirty: [...dirty], hq, known }));
   if (!ok) toast("A helyi tárhely megtelt, a mentés csak online működik");
 }
@@ -425,17 +424,19 @@ function loadLocal() {
 }
 
 /* ===== Szinkron (Firebase REST + EventSource) ===== */
-async function hashCode(code) {
-  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(code));
-  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("");
-}
-const base = () => CFG.databaseURL.replace(/\/$/, "") + "/sync/" + hash + "/";
-const url = p => base() + p + ".json";
+const AUTH_URL = "https://identitytoolkit.googleapis.com/v1/accounts:";
+const base = () => CFG.databaseURL.replace(/\/$/, "") + "/users/" + hash + "/";
+const url = (p, extra = "") => base() + p + ".json?" + (extra ? extra + "&" : "") + "auth=" + encodeURIComponent(session.idToken);
 const pending = () => dirty.size + Object.keys(hq).length;
 
-function connect() {
+let reT = null;
+async function connect() {
   if (!CFG.databaseURL) { conn = "nourl"; syncUI(); return; }
   if (es) es.close();
+  clearTimeout(reT);
+  try { await ensureToken(); }
+  catch (e) { if (e.message === "REFRESH") { conn = "denied"; syncUI(); return; } }
+  reT = setTimeout(connect, Math.max(30000, session.expiresAt - Date.now() - 120000));   // a token lejárta előtt újracsatlakozunk
   conn = "connecting"; syncUI();
   es = new EventSource(url("items"));
   es.addEventListener("put", e => onRemote("put", JSON.parse(e.data)));
@@ -456,8 +457,9 @@ function queue(id) {
 function queuePath(p, body) { hq[p] = body; clearTimeout(flushT); flushT = setTimeout(flush, 400); saveSoon(); syncUI(); }
 
 async function req(p, method, body) {
+  await ensureToken();
   const r = await fetch(url(p), { method, headers: { "Content-Type": "application/json" }, body });
-  if (r.status === 401 || r.status === 403) { conn = "denied"; throw new Error("denied"); }
+  if (r.status === 401 || r.status === 403) { conn = "denied"; syncUI(); throw new Error("denied"); }
   if (!r.ok) throw new Error(r.status);
   return r;
 }
@@ -496,7 +498,7 @@ async function flush() {
 
 async function prune(docId) {
   try {
-    const r = await fetch(url("hist/" + docId) + "?shallow=true");
+    const r = await fetch(url("hist/" + docId, "shallow=true"));
     const keys = Object.keys((await r.json()) || {}).sort((a, b) => b - a);
     for (const k of keys.slice(HIST_KEEP)) fetch(url(`hist/${docId}/${k}`), { method: "DELETE" });
   } catch (e) {}
@@ -558,7 +560,7 @@ function onRemote(type, { path, data }) {
 }
 
 function seed() {
-  const flag = KEY + ".seeded." + hash;
+  const flag = "millnotes.seeded." + hash;
   if (lsGet(flag) === "1") return;
   lsSet(flag, "1");
   const now = Date.now();
@@ -763,7 +765,7 @@ const narrow = () => matchMedia("(max-width:759px)").matches;
 function syncState() {
   const n = pending();
   if (conn === "nourl") return { w: "bad", t: "Nincs Firebase-cím", dot: "b" };
-  if (conn === "denied") return { w: "bad", t: "Az adatbázis elutasította", dot: "b" };
+  if (conn === "denied") return { w: "bad", t: "Jelentkezz be újra", dot: "b" };
   if (!navigator.onLine || conn === "error") return { w: "off", t: n ? `Offline · ${n} változás vár` : "Offline · helyben mentve", dot: "w" };
   if (conn === "connecting") return { w: "spin", t: "Kapcsolódás…", dot: "w" };
   if (n || flushing) return { w: "spin", t: "Mentés…", dot: "w" };
@@ -1136,12 +1138,12 @@ async function doAct(a, el) {
       }
       return;
     case "settings": closeNav(); settings(); return;
-    case "showCode": { const c = $("#codeTxt"); if (c) c.textContent = c.textContent.includes("•") ? lsGet(KEY) : mask(lsGet(KEY)); return; }
-    case "copyCode": try { await navigator.clipboard.writeText(lsGet(KEY)); toast("A kód a vágólapra került"); } catch (e) { toast("Nem sikerült másolni"); } return;
-    case "changeCode": {
+    case "logout": {
       const n = pending();
-      if (!(await confirmBox("Szinkronkód váltása", (n ? `Még ${n} változás nem ért fel a szerverre, váltás után ezek ezen az eszközön maradnak. ` : "") + "Új kód megadása után a hozzá tartozó jegyzetek töltődnek be. A mostani jegyzetek a régi kóddal továbbra is elérhetők.", "Váltás"))) return;
-      saveLocal(); lsDel(KEY); location.reload(); return;
+      if (!(await confirmBox("Kijelentkezés", (n ? `Még ${n} változás nem ment fel a szerverre, ezek ezen az eszközön törlődnek. ` : "") + "Újra belépve a jegyzeteid visszatöltődnek.", "Kijelentkezés", !!n))) return;
+      loggingOut = true; if (es) es.close();
+      lsDel("millnotes.auth"); lsDel(stateKey());
+      location.reload(); return;
     }
     case "exportJson": exportJson(); return;
     case "importJson": importJson(); return;
@@ -1179,15 +1181,14 @@ function trashWithUndo(id) {
 const mask = c => (c || "").replace(/./g, "•").slice(0, 16);
 
 function settings() {
-  const code = lsGet(KEY) || "", weak = code.length < 12;
   const s = syncState();
   modal({
     title: "Beállítások", cancel: "Bezárás", noOk: true,
-    body: `<h4>SZINKRON</h4>
-      <p style="margin-bottom:10px">Állapot: <b style="color:var(--text)">${esc(s.t)}</b>. Ugyanezt a kódot add meg a többi eszközödön is.</p>
-      <div class="srow"><span class="code" id="codeTxt">${esc(mask(code))}</span><button class="mini" data-act="showCode">Mutat</button><button class="mini" data-act="copyCode">Másol</button></div>
-      ${weak ? `<div class="warnbox">Ez a kód rövid, ezért kitalálható. Válts egy legalább 12 karakteres vagy generált kódra.</div>` : ""}
-      <button class="mini" data-act="changeCode">${"Szinkronkód váltása"}</button>
+    body: `<h4>FIÓK</h4>
+      <p style="margin-bottom:10px">Bejelentkezve: <b style="color:var(--text)">${esc(session && session.email || "")}</b></p>
+      <div class="srow"><button class="mini bad" data-act="logout">Kijelentkezés</button></div>
+      <h4>SZINKRON</h4>
+      <p style="margin:0 0 6px">Állapot: <b style="color:var(--text)">${esc(s.t)}</b></p>
       <h4>ADATOK</h4>
       <div class="srow"><button class="mini" data-act="paste">Beillesztés OneNote-ból</button><button class="mini" data-act="exportJson">Teljes export (JSON)</button><button class="mini" data-act="importJson">Import (JSON)</button></div>
       <h4>NÉVJEGY</h4><p style="margin:0">MillNotes ${VERSION} · ${docs().length} jegyzet · ${Object.values(items).filter(i => i.type === "folder" && live(i)).length} mappa</p>`
@@ -1368,32 +1369,84 @@ window.appShareIn = (subject, text) => {
 };
 
 /* ===== Belépés ===== */
-function genCode() {
-  const a = "abcdefghjkmnpqrstuvwxyz23456789", r = crypto.getRandomValues(new Uint8Array(16));
-  return [...r].map(x => a[x % a.length]).join("").match(/.{4}/g).join("-");
+/* ===== Fiók: e-mail és jelszó (Firebase Authentication REST) ===== */
+let session = null, refreshing = null, loggingOut = false;
+const loadSession = () => { try { return JSON.parse(lsGet("millnotes.auth") || "null"); } catch (e) { return null; } };
+function saveSession(x) { session = x; lsSet("millnotes.auth", JSON.stringify(x)); }
+async function authPost(op, body) {
+  const r = await fetch(AUTH_URL + op + "?key=" + CFG.apiKey, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, returnSecureToken: true }) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error((j.error && j.error.message) || "HTTP " + r.status);
+  return j;
 }
-function gate() {
+const AUTH_ERR = {
+  EMAIL_EXISTS: "Ez az e-mail-cím már foglalt.",
+  INVALID_LOGIN_CREDENTIALS: "Hibás e-mail-cím vagy jelszó.",
+  INVALID_PASSWORD: "Hibás e-mail-cím vagy jelszó.",
+  EMAIL_NOT_FOUND: "Hibás e-mail-cím vagy jelszó.",
+  INVALID_EMAIL: "Érvénytelen e-mail-cím.",
+  WEAK_PASSWORD: "A jelszó legalább 6 karakter legyen.",
+  USER_DISABLED: "Ez a fiók le van tiltva.",
+  TOO_MANY_ATTEMPTS_TRY_LATER: "Túl sok próbálkozás. Próbáld meg később."
+};
+const authMsg = e => AUTH_ERR[e.message] || "Nem sikerült: " + e.message;
+async function signIn(email, password, signup) {
+  const j = await authPost(signup ? "signUp" : "signInWithPassword", { email, password });
+  saveSession({ uid: j.localId, email: j.email, idToken: j.idToken, refreshToken: j.refreshToken, expiresAt: Date.now() + (+j.expiresIn) * 1000 });
+}
+async function ensureToken() {
+  if (!session) throw new Error("NOSESSION");
+  if (session.expiresAt - Date.now() > 60000) return;
+  if (!refreshing) refreshing = (async () => {
+    const r = await fetch("https://securetoken.googleapis.com/v1/token?key=" + CFG.apiKey, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: "grant_type=refresh_token&refresh_token=" + encodeURIComponent(session.refreshToken) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error("REFRESH");
+    saveSession({ ...session, idToken: j.id_token, refreshToken: j.refresh_token, expiresAt: Date.now() + (+j.expires_in) * 1000 });
+  })().finally(() => { refreshing = null; });
+  return refreshing;
+}
+
+function authGate() {
   return new Promise(res => {
     const g = document.createElement("div");
     g.className = "gate";
-    g.innerHTML = `<div class="dlg">${wheel("live")}<h3>Üdv a MillNotes-ban</h3>
-      <p>Adj meg egy szinkronkódot. Ugyanezt a kódot add meg a telefonodon és a gépeden is, így mindenhol ugyanazok a jegyzetek látszanak.</p>
-      <input class="field" id="sc" placeholder="Szinkronkód (legalább 8 karakter)" autocomplete="off" aria-label="Szinkronkód">
-      <div class="row2" style="justify-content:space-between"><button class="btn" id="gen">Erős kód generálása</button><button class="btn pri" id="sg">Csatlakozás</button></div>
-      <p style="font-size:12px;margin:14px 0 0">A kódot jegyezd fel: ez a kulcs a jegyzeteidhez, más eszközön csak vele érheted el őket.</p></div>`;
+    let mode = "login";
+    const draw = () => {
+      g.innerHTML = `<div class="dlg">${wheel("live")}<h3>${mode === "login" ? "Bejelentkezés" : "Új fiók"}</h3>
+        <p>${mode === "login" ? "Ezzel a fiókkal bármelyik eszközön látod a jegyzeteidet." : "A jegyzeteid a fiókodhoz tartoznak, más nem látja őket."}</p>
+        <input class="field" id="em" type="email" placeholder="E-mail-cím" autocomplete="email" aria-label="E-mail-cím">
+        <input class="field" id="pw" type="password" placeholder="Jelszó (legalább 6 karakter)" autocomplete="${mode === "login" ? "current-password" : "new-password"}" aria-label="Jelszó" style="margin-top:8px">
+        <div id="gerr" class="warnbox" style="display:none;margin-top:10px"></div>
+        <div class="row2" style="justify-content:space-between;margin-top:14px">
+          <button class="btn" id="tg">${mode === "login" ? "Új fiók" : "Van már fiókom"}</button>
+          <button class="btn pri" id="go">${mode === "login" ? "Belépés" : "Létrehozás"}</button>
+        </div></div>`;
+      const em = g.querySelector("#em"), pw = g.querySelector("#pw"), go = g.querySelector("#go");
+      const showErr = m => { const b = g.querySelector("#gerr"); b.textContent = m; b.style.display = "block"; };
+      em.focus();
+      g.querySelector("#tg").onclick = () => { mode = mode === "login" ? "signup" : "login"; draw(); };
+      const submit = async () => {
+        const e = em.value.trim(), p = pw.value;
+        if (!e.includes("@")) return showErr("Adj meg egy érvényes e-mail-címet.");
+        if (p.length < 6) return showErr("A jelszó legalább 6 karakter legyen.");
+        go.disabled = true;
+        try { await signIn(e, p, mode === "signup"); g.remove(); res(); }
+        catch (x) { go.disabled = false; showErr(authMsg(x)); }
+      };
+      go.onclick = submit;
+      pw.onkeydown = e => { if (e.key === "Enter") submit(); };
+    };
     document.body.appendChild(g);
-    const f = g.querySelector("#sc"); f.focus();
-    g.querySelector("#gen").onclick = () => { f.value = genCode(); f.focus(); f.select(); };
-    const go = () => { const v = f.value.trim(); if (v.length < 8) { toast("Legalább 8 karakter kell"); f.focus(); return; } g.remove(); res(v); };
-    g.querySelector("#sg").onclick = go;
-    f.addEventListener("keydown", e => { if (e.key === "Enter") go(); });
+    draw();
   });
 }
 
 async function init() {
-  let code = lsGet(KEY);
-  if (!code) { code = await gate(); lsSet(KEY, code); }
-  hash = await hashCode(code);
+  session = loadSession();
+  if (!session || !session.uid) await authGate();
+  try { await ensureToken(); }
+  catch (e) { if (e.message === "REFRESH") { lsDel("millnotes.auth"); session = null; await authGate(); } }   // a fiók lejárt: új belépés kell, a helyi adatok megmaradnak
+  hash = session.uid;
   loadLocal();
   render();
   connect();
