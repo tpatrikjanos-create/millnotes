@@ -1,0 +1,70 @@
+name: Android APK
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'index.html'
+      - 'android/**'
+      - '.github/workflows/android.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # az app mindig a gyökérben lévő index.html-lel épüljön
+      - name: Friss index.html az assets mappába
+        run: cp index.html android/app/src/main/assets/index.html
+
+      # opcionális: állandó aláíró kulcs a repó titkaiból (MILLNOTES_KEYSTORE_B64, MILLNOTES_KEY_PASS)
+      - name: Aláíró kulcs
+        env:
+          KS: ${{ secrets.MILLNOTES_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KS" ]; then echo "$KS" | base64 -d > android/millnotes.jks; echo "saját kulcs"; else echo "nincs titok: debug-kulcs"; fi
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: APK fordítása
+        working-directory: android
+        shell: bash
+        env:
+          MILLNOTES_KEY_PASS: ${{ secrets.MILLNOTES_KEY_PASS }}
+        run: |
+          set -o pipefail
+          [ -n "$MILLNOTES_KEY_PASS" ] || unset MILLNOTES_KEY_PASS
+          gradle assembleRelease --no-daemon --stacktrace 2>&1 | tee build.log
+
+      - name: Hibanapló a commithoz (ha elbukott)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          grep -E "^e: |error:|FAILURE|What went wrong|> " android/build.log | head -n 80 > tail.txt || true
+          echo '---' >> tail.txt
+          tail -n 60 android/build.log >> tail.txt || true
+          gh api repos/${{ github.repository }}/commits/${{ github.sha }}/comments -F body=@tail.txt
+
+      - name: Kiadás (apk-latest)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp android/app/build/outputs/apk/release/app-release.apk MillNotes.apk
+          gh release delete apk-latest --cleanup-tag -y || true
+          gh release create apk-latest MillNotes.apk \
+            --title "MillNotes APK (legfrissebb)" \
+            --notes "Automatikusan épült a ${GITHUB_SHA::7} commitból. Telefonon nyisd meg és telepítsd." \
+            --target ${{ github.sha }} --latest

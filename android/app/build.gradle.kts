@@ -11,13 +11,27 @@ android {
         applicationId = "hu.millnotes"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
+        versionName = "2.1"
+    }
+
+    // Saját aláíró kulcs csak akkor, ha a GitHub-titokból megkapta (a repóba nem kerül kulcs).
+    // Nélküle az alap debug-kulccsal írja alá, így is telepíthető.
+    val ks = file("../millnotes.jks")
+    val ksPass = System.getenv("MILLNOTES_KEY_PASS")
+    signingConfigs {
+        if (ks.exists() && ksPass != null) create("mill") {
+            storeFile = ks
+            storePassword = ksPass
+            keyAlias = "millnotes"
+            keyPassword = ksPass
+        }
     }
 
     buildTypes {
-        release {
+        getByName("release") {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.findByName("mill") ?: signingConfigs.getByName("debug")
         }
     }
 
