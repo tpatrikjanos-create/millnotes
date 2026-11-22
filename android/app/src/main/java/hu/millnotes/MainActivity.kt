@@ -109,7 +109,7 @@ class MainActivity : ComponentActivity() {
             .build()
 
         web = WebView(this)
-        web.setBackgroundColor(0xFF0B1220.toInt())
+        web.setBackgroundColor(0xFF0D0A12.toInt())
         setContentView(web)
 
         web.settings.javaScriptEnabled = true

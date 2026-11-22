@@ -27,7 +27,7 @@ sealed class MainForm : Form
         Width = 1200;
         Height = 800;
         MinimumSize = new Size(640, 480);
-        BackColor = Color.FromArgb(11, 18, 32);
+        BackColor = Color.FromArgb(13, 10, 18);
         Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
         Controls.Add(web);
         Load += async (s, e) => await InitAsync();
